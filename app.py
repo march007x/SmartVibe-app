@@ -12,8 +12,8 @@ FIREBASE_URL = 'https://smart-vibe-f944b-default-rtdb.asia-southeast1.firebaseda
 STATE_URL = 'https://smart-vibe-f944b-default-rtdb.asia-southeast1.firebasedatabase.app/SmartVibe/State3F.json'
 
 # --- ใส่ Token และ Chat ID ของคุณตรงนี้ ---
-TELEGRAM_BOT_TOKEN = "ใส่_TELEGRAM_BOT_TOKEN_ที่ได้จาก_BotFather"
-TELEGRAM_CHAT_ID = "ใส่_CHAT_ID_ของคุณ"
+TELEGRAM_BOT_TOKEN = "8816324739:AAHZEKbjTyvLUORVd97t5kzFWy7pIxqFEhY"
+TELEGRAM_CHAT_ID = "7360818672"
 # ==========================================================
 
 st.set_page_config(page_title="SmartVibe Layer Analysis", layout="wide")
