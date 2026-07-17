@@ -8,7 +8,7 @@ from streamlit_autorefresh import st_autorefresh
 # ==========================================================
 # ⚙️ ส่วนตั้งค่าโปรเจกต์ และ Telegram Bot
 # ==========================================================
-FIREBASE_URL = 'https://smartvibe-2768d-default-rtdb.asia-southeast1.firebasedatabase.app/SmartVibe/History3F.json'
+FIREBASE_URL = 'https://smartvibe-2768d-default-rtdb.asia-southeast1.firebasedatabase.app/SmartVibe.json'
 STATE_URL = 'https://smartvibe-2768d-default-rtdb.asia-southeast1.firebasedatabase.app/SmartVibe/State3F.json'
 AUTH_TOKEN = 'ho0WP6QoG1Pj3UkNmMX3qyCiOaTYWBXVf6bSEEce'
 
