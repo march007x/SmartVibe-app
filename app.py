@@ -8,8 +8,8 @@ from streamlit_autorefresh import st_autorefresh
 # ==========================================================
 # ⚙️ ส่วนตั้งค่าโปรเจกต์ และ Telegram Bot
 # ==========================================================
-FIREBASE_URL = 'https://smart-vibe-f944b-default-rtdb.asia-southeast1.firebasedatabase.app/SmartVibe/History3F.json'
-STATE_URL = 'https://smart-vibe-f944b-default-rtdb.asia-southeast1.firebasedatabase.app/SmartVibe/State3F.json'
+FIREBASE_URL = 'https://smartvibee-22adf-default-rtdb.asia-southeast1.firebasedatabase.app/SmartVibe/History3F.json'
+STATE_URL = 'https://smartvibee-22adf-default-rtdb.asia-southeast1.firebasedatabase.app/SmartVibe/State3F.json'
 
 # --- ใส่ Token และ Chat ID ของคุณตรงนี้ ---
 TELEGRAM_BOT_TOKEN = "8816324739:AAHZEKbjTyvLUORVd97t5kzFWy7pIxqFEhY"
