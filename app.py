@@ -5,17 +5,22 @@ import requests
 from scipy.signal import welch
 from streamlit_autorefresh import st_autorefresh
 
+# ==========================================================
+# ⚙️ ส่วนตั้งค่าโปรเจกต์ และ Telegram Bot (ใส่รหัสของคุณเรียบร้อยแล้ว)
+# ==========================================================
+FIREBASE_URL = 'https://smartvibe-2768d-default-rtdb.asia-southeast1.firebasedatabase.app/SmartVibe/History3F.json'
+STATE_URL = 'https://smartvibe-2768d-default-rtdb.asia-southeast1.firebasedatabase.app/SmartVibe/State3F.json'
+AUTH_TOKEN = 'bmVF3XzxEMSVzX8oYMGpN9NxG4TbohM3xxnWFtbO'
+
+TELEGRAM_BOT_TOKEN = "8816324739:AAHZEKbjTyvLUORVd97t5kzFWy7pIxqFEhY"
+TELEGRAM_CHAT_ID = "7360818672"
+# ==========================================================
+
 st.set_page_config(page_title="SmartVibe Layer Analysis", layout="wide")
 st.title("SmartVibe: ระบบวิเคราะห์ความสั่นสะเทือนแยก")
 
 st_autorefresh(interval=850, limit=None, key="smartvibe_autorefresh")
 
-# --- แก้ไขเป็น URL ของโปรเจกต์ใหม่ ---
-FIREBASE_URL = 'https://smartvibe-2768d-default-rtdb.asia-southeast1.firebasedatabase.app/SmartVibe/History3F.json'
-STATE_URL = 'https://smartvibe-2768d-default-rtdb.asia-southeast1.firebasedatabase.app/SmartVibe/State3F.json'
-
-# --- ใส่ Database Secret ตัวใหม่ที่คุณเพิ่งให้มา ---
-AUTH_TOKEN = 'bmVF3XzxEMSVzX8oYMGpN9NxG4TbohM3xxnWFtbO'
 QUERY = f'?auth={AUTH_TOKEN}&orderBy="$key"&limitToLast=500'
 STATE_QUERY = f'?auth={AUTH_TOKEN}'
 NOMINAL_FS = 50.0
@@ -28,6 +33,10 @@ MIN_CONSEC = 2
 if 'http_session' not in st.session_state: st.session_state.http_session = requests.Session()
 if 'last_uptime' not in st.session_state: st.session_state.last_uptime = 0
 if 'stuck_counter' not in st.session_state: st.session_state.stuck_counter = 0
+
+# ใช้ตรวจสอบเพื่อไม่ให้แจ้งเตือนซ้ำหากสถานะยังเหมือนเดิม
+if 'prev_status' not in st.session_state: st.session_state.prev_status = {0: 'green', 1: 'green', 2: 'green'}
+
 for i in range(3):
     if f'base_amp{i}' not in st.session_state: st.session_state[f'base_amp{i}'] = None
     if f'history_a{i}' not in st.session_state: st.session_state[f'history_a{i}'] = []
@@ -43,6 +52,23 @@ with st.sidebar:
     Y2R = st.slider("🟡→🔴", 50, 99, 65, 1)
     Y2G = st.slider("🟡→🟢", 50, 99, 87, 1)
     R2Y = st.slider("🔴→🟡", 50, 99, 70, 1)
+
+# ===== Telegram Notification Function =====
+def send_telegram_notification(message):
+    """ส่งข้อความแจ้งเตือนผ่าน Telegram API"""
+    if not TELEGRAM_BOT_TOKEN or "ใส่_" in TELEGRAM_BOT_TOKEN:
+        return
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+    try:
+        st.session_state.http_session.post(url, json=payload, timeout=3)
+    except Exception as e:
+        st.sidebar.warning(f"Telegram Send Error: {e}")
 
 def fetch_data():
     try:
@@ -82,7 +108,6 @@ def fetch_remote_state():
     except Exception: pass
     return {}
 
-# เพิ่มพารามิเตอร์ is_new_data เพื่อควบคุมการเขียน History
 def get_band_power(df, col, ch_idx, is_new_data):
     sig = df[col].values.astype(float)
     sig = sig - np.mean(sig)
@@ -93,7 +118,7 @@ def get_band_power(df, col, ch_idx, is_new_data):
     band_power = float(np.sum(psd[mask])) if mask.any() else 0.0
     
     hist = st.session_state[f'history_a{ch_idx}']
-    if is_new_data:  # บันทึกประวัติเฉพาะเมื่อมีข้อมูลใหม่เข้ามาจริงเท่านั้น
+    if is_new_data:
         hist.append(band_power)
         if len(hist) > HISTORY_SIZE: hist.pop(0)
         st.session_state[f'history_a{ch_idx}'] = hist
@@ -102,17 +127,15 @@ def get_band_power(df, col, ch_idx, is_new_data):
 
 def compute_health(amps):
     bases = [st.session_state[f'base_amp{i}'] for i in range(3)]
-    # แก้บั๊ก: เช็กค่า None แทนการใช้ all() เผื่อกรณีค่า base เป็น 0.0
     if any(b is None for b in bases): return [None]*3
     return [min(amps[i]/bases[i]*100, 100.0) if bases[i] > 0 else 0.0 for i in range(3)]
 
-# เพิ่มพารามิเตอร์ is_new_data ป้องกันตัวนับเบิ้ลค่าตอน Rerun หน้าจอเปล่าๆ
-def update_status(pct, ch_idx, is_new_data):
+def update_status(pct, ch_idx, is_new_data, floor_name):
     s = st.session_state[f'status{ch_idx}']
     c = st.session_state[f'consec{ch_idx}']
     
     if not is_new_data:
-        return s, c  # ถ้าไม่มีข้อมูลใหม่ ไม่ต้องคำนวณ State Machine ซ้ำ ให้ส่งค่าเดิมกลับไปเลย
+        return s, c
         
     new_s = s
     if s == 'green':
@@ -133,6 +156,23 @@ def update_status(pct, ch_idx, is_new_data):
     elif s == 'red':
         c = c+1 if pct >= R2Y else 0
         if c >= MIN_CONSEC: new_s, c = 'yellow', 0
+
+    # 🔔 ระบบดักตรวจเช็กสถานะเพื่อส่งเข้า Telegram (แจ้งเตือนทั้ง Yellow และ Red)
+    if new_s != st.session_state.prev_status[ch_idx]:
+        status_emojis = {'green': '🟢 ปกติ', 'yellow': '⚠️ เฝ้าระวัง', 'red': '🚨 อันตราย!'}
+        old_status_text = status_emojis.get(st.session_state.prev_status[ch_idx], st.session_state.prev_status[ch_idx])
+        new_status_text = status_emojis.get(new_s, new_s)
+        
+        # ประกอบข้อความแจ้งเตือน
+        msg = f"🔔 *[SmartVibe Alert]*\n📍 *{floor_name}*\n"
+        msg += f"🔄 สถานะเปลี่ยน: {old_status_text} ➡️ *{new_status_text}*\n"
+        msg += f"📉 Health % ล่าสุด: `{pct:.1f}%`"
+        
+        # เรียกส่งไลน์แจ้งเตือน Telegram
+        send_telegram_notification(msg)
+        
+        # บันทึกสถานะปัจจุบันเก็บไว้ตรวจสอบรอบถัดไป
+        st.session_state.prev_status[ch_idx] = new_s
 
     st.session_state[f'status{ch_idx}'] = new_s
     st.session_state[f'consec{ch_idx}'] = c
@@ -156,8 +196,6 @@ df = fetch_data()
 
 if not df.empty and len(df) > 50:
     cur = df['uptime_ms'].iloc[-1]
-    
-    # ตรวจสอบว่าเป็นข้อมูลชุดใหม่จริงหรือไม่
     is_new_data = (cur != st.session_state.last_uptime)
     
     if is_new_data:
@@ -166,10 +204,9 @@ if not df.empty and len(df) > 50:
     else:
         st.session_state.stuck_counter += 1
         
-    if st.session_state.stuck_counter >= 10:  # ปรับเพิ่มเป็น 10 ครั้งให้ทนต่อ Latency เน็ตมากขึ้น
+    if st.session_state.stuck_counter >= 10:
         st.error("🚨 ข้อมูลหยุดนิ่ง — เซ็นเซอร์อาจเน็ตหลุด หรือบอร์ดค้าง")
 
-    # ส่งตัวแปร is_new_data เข้าไปด้วย
     amps = [get_band_power(df, f'AccX_CH{i}', i, is_new_data) for i in range(3)]
     health = compute_health(amps)
     floor_names = ["ชั้น 1 (ฐานราก)", "ชั้น 2 (กลาง)", "ชั้น 3 (ยอด)"]
@@ -184,6 +221,7 @@ if not df.empty and len(df) > 50:
                 st.session_state[f'status{i}'] = 'green'
                 st.session_state[f'consec{i}'] = 0
                 st.session_state[f'consec_dir{i}'] = None
+                st.session_state.prev_status[i] = 'green'
             ok = push_baseline_to_firebase(amps)
             if ok: st.success("✅ ล็อก baseline และส่งขึ้น Firebase แล้ว")
             st.rerun()
@@ -195,6 +233,7 @@ if not df.empty and len(df) > 50:
                 st.session_state[f'status{i}'] = 'green'
                 st.session_state[f'consec{i}'] = 0
                 st.session_state[f'consec_dir{i}'] = None
+                st.session_state.prev_status[i] = 'green'
             st.rerun()
 
     st.markdown("---")
@@ -222,7 +261,7 @@ if not df.empty and len(df) > 50:
 
             if base and base > 0 and health[i] is not None:
                 pct = health[i]
-                status, cnt = update_status(pct, i, is_new_data) # ส่งตัวแปรควบคุมเข้าไป
+                status, cnt = update_status(pct, i, is_new_data, floor_names[i])
                 st.metric("Health %", f"{pct:.1f}%")
                 st.progress(min(int(pct), 100))
 
@@ -243,7 +282,7 @@ if not df.empty and len(df) > 50:
         with st.expander("ℹ️ debug"):
             dts = df['uptime_ms'].diff().dropna()
             nd = dts[(dts >= 15) & (dts <= 40)]
-            st.write("ช่วงดิฟของ Uptime (ms):", nd.describe()) # เพิ่มตัวแสดงผลแก้ไข Dead Code
+            st.write("ช่วงดิฟของ Uptime (ms):", nd.describe())
 
     st.markdown("---")
     with st.expander("🤖 สถานะ Cloud Function (ฝั่งแจ้งเตือน Telegram)"):
