@@ -18,11 +18,8 @@ from streamlit_autorefresh import st_autorefresh
 
 # ==========================================================
 
-FIREBASE_URL = 'https://smartvibe-2768d-default-rtdb.asia-southeast1.firebasedatabase.app/SmartVibe/History3F.json'
-
-STATE_URL = 'https://smartvibe-2768d-default-rtdb.asia-southeast1.firebasedatabase.app/SmartVibe/State3F.json'
-
-AUTH_TOKEN = 'ho0WP6QoG1Pj3UkNmMX3qyCiOaTYWBXVf6bSEEce'
+FIREBASE_URL = 'https://smart-vibe-f944b-default-rtdb.asia-southeast1.firebasedatabase.app/SmartVibe/History3F.json'
+STATE_URL = 'https://smart-vibe-f944b-default-rtdb.asia-southeast1.firebasedatabase.app/SmartVibe/State3F.json'
 
 
 
