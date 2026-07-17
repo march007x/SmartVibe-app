@@ -10,7 +10,7 @@ from streamlit_autorefresh import st_autorefresh
 # ==========================================================
 FIREBASE_URL = 'https://smartvibe-2768d-default-rtdb.asia-southeast1.firebasedatabase.app/SmartVibe/History3F.json'
 STATE_URL = 'https://smartvibe-2768d-default-rtdb.asia-southeast1.firebasedatabase.app/SmartVibe/State3F.json'
-AUTH_TOKEN = 'bmVF3XzxEMSVzX8oYMGpN9NxG4TbohM3xxnWFtbO'
+AUTH_TOKEN = 'ho0WP6QoG1Pj3UkNmMX3qyCiOaTYWBXVf6bSEEce'
 
 # --- ใส่ Token และ Chat ID ของคุณตรงนี้ ---
 TELEGRAM_BOT_TOKEN = "ใส่_TELEGRAM_BOT_TOKEN_ที่ได้จาก_BotFather"
