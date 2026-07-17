@@ -1,298 +1,144 @@
+import streamlit as pd_st
 import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
+import time
 from scipy.signal import welch
-from streamlit_autorefresh import st_autorefresh
+import plotly.graph_objects as go
 
-# ==========================================================
-# ⚙️ ส่วนตั้งค่าโปรเจกต์ และ Telegram Bot (ใส่รหัสของคุณเรียบร้อยแล้ว)
-# ==========================================================
-FIREBASE_URL = 'https://smartvibe-2768d-default-rtdb.asia-southeast1.firebasedatabase.app/SmartVibe/History3F.json'
-STATE_URL = 'https://smartvibe-2768d-default-rtdb.asia-southeast1.firebasedatabase.app/SmartVibe/State3F.json'
-AUTH_TOKEN = 'bmVF3XzxEMSVzX8oYMGpN9NxG4TbohM3xxnWFtbO'
+# 1. ตั้งค่าการเชื่อมต่อ คลาวด์ และบอทแจ้งเตือน (แก้ค่าโทเคนของคุณที่นี่)
+FIREBASE_URL = "https://smartvibe-2768d-default-rtdb.asia-southeast1.firebasedatabase.app/SmartVibe/History3F.json"
+AUTH_TOKEN = "bmVF3XzxEMSVzX8oYMGpN9NxG4TbohM3xxnWFtbO"
+TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"  # ใส่ Token ของคุณ
+TELEGRAM_CHAT_ID = "YOUR_TELEGRAM_CHAT_ID"      # ใส่ Chat ID ของคุณ
 
-TELEGRAM_BOT_TOKEN = "8816324739:AAHZEKbjTyvLUORVd97t5kzFWy7pIxqFEhY"
-TELEGRAM_CHAT_ID = "7360818672"
-# ==========================================================
+# ตั้งค่าหน้าเว็บหน้าตาแอปพลิเคชัน
+st.set_page_config(page_title="Structural Health Monitoring Dashboard", layout="wide")
+st.title("🏢 ระบบตรวจวัดพฤติกรรมความสั่นสะเทือนโครงสร้างอาคาร 3 ชั้น (SHM)")
 
-st.set_page_config(page_title="SmartVibe Layer Analysis", layout="wide")
-st.title("SmartVibe: ระบบวิเคราะห์ความสั่นสะเทือนแยก")
+# สร้าง HTTP Session ทิ้งไว้เพื่อลดการโหลดเปิด-ปิดพอร์ตเชื่อมต่อซ้ำๆ
+if 'http_session' not in st.session_state:
+    st.session_state.http_session = requests.Session()
+if 'last_alert_time' not in st.session_state:
+    st.session_state.last_alert_time = 0
 
-st_autorefresh(interval=850, limit=None, key="smartvibe_autorefresh")
+# --- แถบตั้งค่าควบคุมขวา/ซ้าย (Sidebar) ---
+st.sidebar.header("⚙️ การตั้งค่าระบบ")
+sampling_rate = st.sidebar.number_input("ความถี่ในการเก็บข้อมูล (Hz)", value=50, disabled=True)
+alert_threshold = st.sidebar.slider("เกณฑ์แจ้งเตือนความเร่งวิกฤต (g)", 0.1, 2.0, 0.5, step=0.05)
 
-QUERY = f'?auth={AUTH_TOKEN}&orderBy="$key"&limitToLast=500'
-STATE_QUERY = f'?auth={AUTH_TOKEN}'
-NOMINAL_FS = 50.0
-FORCING_FREQ = 8.5
-BAND_HZ = 1.5
-HISTORY_SIZE = 7
-MIN_CONSEC = 2
+st.sidebar.subheader("📊 พารามิเตอร์ Welch's Method")
+nperseg_val = st.sidebar.selectbox("ความยาวหน้าต่างสัญญาณ (Nperseg)", [64, 128, 256], index=1)
+overlap_val = st.sidebar.slider("เปอร์เซ็นต์การซ้อนทับ (Overlap)", 0, 90, 50, step=10) / 100.0
 
-# ===== Session state =====
-if 'http_session' not in st.session_state: st.session_state.http_session = requests.Session()
-if 'last_uptime' not in st.session_state: st.session_state.last_uptime = 0
-if 'stuck_counter' not in st.session_state: st.session_state.stuck_counter = 0
+# ฟังก์ชันยิงแจ้งเตือนผ่าน Telegram (พร้อมระบบป้องกันสแปม ทำงานห่างกันอย่างน้อย 5 วินาที)
+def trigger_telegram_alert(floor, current_val):
+    current_time = time.time()
+    if current_time - st.session_state.last_alert_time > 5:
+        msg = f"⚠️ แจ้งเตือนวิกฤตโครงสร้าง! พบความสั่นสะเทือนสูงเกินกำหนดที่ [{floor}] ค่าปัจจุบัน: {current_val:.3f} g (เกณฑ์ปลอดภัย: {alert_threshold} g)"
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=2)
+            st.session_state.last_alert_time = current_time
+        except Exception as e:
+            st.sidebar.error(f"ไม่สามารถส่ง Telegram ได้: {e}")
 
-# ใช้ตรวจสอบเพื่อไม่ให้แจ้งเตือนซ้ำหากสถานะยังเหมือนเดิม
-if 'prev_status' not in st.session_state: st.session_state.prev_status = {0: 'green', 1: 'green', 2: 'green'}
-
-for i in range(3):
-    if f'base_amp{i}' not in st.session_state: st.session_state[f'base_amp{i}'] = None
-    if f'history_a{i}' not in st.session_state: st.session_state[f'history_a{i}'] = []
-    if f'rms_ch{i}' not in st.session_state: st.session_state[f'rms_ch{i}'] = 0.0
-    if f'status{i}' not in st.session_state: st.session_state[f'status{i}'] = 'green'
-    if f'consec{i}' not in st.session_state: st.session_state[f'consec{i}'] = 0
-    if f'consec_dir{i}' not in st.session_state: st.session_state[f'consec_dir{i}'] = None
-
-# ===== Sidebar =====
-with st.sidebar:
-    st.header("⚙️ ปรับ Threshold")
-    G2Y = st.slider("🟢→🟡", 50, 99, 80, 1)
-    Y2R = st.slider("🟡→🔴", 50, 99, 65, 1)
-    Y2G = st.slider("🟡→🟢", 50, 99, 87, 1)
-    R2Y = st.slider("🔴→🟡", 50, 99, 70, 1)
-
-# ===== Telegram Notification Function =====
-def send_telegram_notification(message):
-    """ส่งข้อความแจ้งเตือนผ่าน Telegram API"""
-    if not TELEGRAM_BOT_TOKEN or "ใส่_" in TELEGRAM_BOT_TOKEN:
-        return
-    
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown"
-    }
-    try:
-        st.session_state.http_session.post(url, json=payload, timeout=3)
-    except Exception as e:
-        st.sidebar.warning(f"Telegram Send Error: {e}")
-
+# ฟังก์ชันดึงข้อมูลจาก Firebase Realtime Database
 def fetch_data():
     try:
-        res = st.session_state.http_session.get(FIREBASE_URL + QUERY, timeout=3)
+        query_url = f"{FIREBASE_URL}?auth={AUTH_TOKEN}&orderBy=\"$key\"&limitToLast=400"
+        res = st.session_state.http_session.get(query_url, timeout=3)
         if res.status_code == 200:
             data = res.json()
-            if not data: return pd.DataFrame()
-            flat = {}
-            for k, v in data.items():
-                if not isinstance(v, dict): continue
-                if 'uptime_ms' in v: flat[k] = v
-                else:
-                    for sk, sv in v.items():
-                        if isinstance(sv, dict) and 'uptime_ms' in sv:
-                            flat[sk] = sv
-            if not flat: return pd.DataFrame()
-            df = pd.DataFrame.from_dict(flat, orient='index')
+            if not data: 
+                return pd.DataFrame()
+            
+            # แปลงโครงสร้างข้อมูล JSON ให้เป็นตาราง DataFrame
+            df = pd.DataFrame.from_dict(data, orient='index')
             df['uptime_ms'] = pd.to_numeric(df['uptime_ms'], errors='coerce')
             df = df.dropna(subset=['uptime_ms'])
-            return df.sort_values('uptime_ms').reset_index(drop=True)
+            
+            # เรียงดัชนีคีย์ข้อความ (คีย์ 0000... จะเรียงตัวสมบูรณ์แบบที่จุดนี้)
+            return df.sort_index().reset_index(drop=True)
     except Exception as e:
-        st.sidebar.error(f"fetch error: {e}")
+        st.sidebar.error(f"การเชื่อมต่อคลาวด์ขัดข้อง: {e}")
     return pd.DataFrame()
 
-def push_baseline_to_firebase(amps):
-    payload = {f"base_amp{i}": amps[i] for i in range(3)}
-    try:
-        res = st.session_state.http_session.patch(STATE_URL + STATE_QUERY, json=payload, timeout=3)
-        return res.status_code == 200
-    except Exception:
-        return False
+# --- ส่วนหลักการประมวลผลและแสดงผล ---
+df_data = fetch_data()
 
-def fetch_remote_state():
-    try:
-        res = st.session_state.http_session.get(STATE_URL + STATE_QUERY, timeout=3)
-        if res.status_code == 200: return res.json() or {}
-    except Exception: pass
-    return {}
+if not df_data.empty and len(df_data) > 10:
+    # คำนวณความถี่ตัวอย่างจริงเพื่อความแม่นยำทางสถิติ
+    dt_series = df_data['uptime_ms'].diff().dropna() / 1000.0
+    actual_fs = 1.0 / dt_series.mean() if dt_series.mean() > 0 else 50.0
 
-def get_band_power(df, col, ch_idx, is_new_data):
-    sig = df[col].values.astype(float)
-    sig = sig - np.mean(sig)
-    st.session_state[f'rms_ch{ch_idx}'] = float(np.sqrt(np.mean(sig**2)))
-    
-    fw, psd = welch(sig, fs=NOMINAL_FS, nperseg=min(256, len(sig)//2), window='hann')
-    mask = (fw >= FORCING_FREQ - BAND_HZ) & (fw <= FORCING_FREQ + BAND_HZ)
-    band_power = float(np.sum(psd[mask])) if mask.any() else 0.0
-    
-    hist = st.session_state[f'history_a{ch_idx}']
-    if is_new_data:
-        hist.append(band_power)
-        if len(hist) > HISTORY_SIZE: hist.pop(0)
-        st.session_state[f'history_a{ch_idx}'] = hist
+    # ตรวจสอบค่าความเร่งสูงสุดเพื่อแจ้งเตือนความปลอดภัยโครงสร้าง
+    max_ch0 = max(df_data['AccZ_CH0'].abs().max(), df_data['AccX_CH0'].abs().max())
+    max_ch1 = max(df_data['AccZ_CH1'].abs().max(), df_data['AccX_CH1'].abs().max())
+    max_ch2 = max(df_data['AccZ_CH2'].abs().max(), df_data['AccX_CH2'].abs().max())
+
+    # ตรวจสอบสถานะการแจ้งเตือนพังทลาย
+    if max_ch2 > alert_threshold: trigger_telegram_alert("ชั้นที่ 3 (Top)", max_ch2)
+    elif max_ch1 > alert_threshold: trigger_telegram_alert("ชั้นที่ 2 (Mid)", max_ch1)
+    elif max_ch0 > alert_threshold: trigger_telegram_alert("ชั้นที่ 1 (Base)", max_ch0)
+
+    # 1. แสดงกล่องสถานะค่าความเร่งสูงสุดแบบเรียลไทม์ (Real-time Metrics)
+    col1, col2, col3 = st.columns(3)
+    with col1: st.metric("🔺 ความเร่งสูงสุดชั้น 3 (Top)", f"{max_ch2:.3f} g", delta=f"{max_ch2-alert_threshold:.3f} g" if max_ch2 > alert_threshold else "ปกติ")
+    with col2: st.metric("🏢 ความเร่งสูงสุดชั้น 2 (Mid)", f"{max_ch1:.3f} g", delta=f"{max_ch1-alert_threshold:.3f} g" if max_ch1 > alert_threshold else "ปกติ")
+    with col3: st.metric("🧱 ความเร่งสูงสุดชั้น 1 (Base)", f"{max_ch0:.3f} g", delta=f"{max_ch0-alert_threshold:.3f} g" if max_ch0 > alert_threshold else "ปกติ")
+
+    # แยกหน้าจัดสัดส่วนการพล็อตกราฟเป็น 2 แท็บข้อมูล
+    tab1, tab2, tab3 = st.tabs(["📉 สัญญาณโดเมนเวลา (Time-Series)", "📊 สเปกตรัมความถี่ (Welch PSD)", "🛠️ ตัวช่วยวิเคราะห์ระบบ (Debug)"])
+
+    with tab1:
+        st.subheader("กราฟแสดงความเร่งแกนแนวตั้ง (Acc Z) ของอาคารทั้ง 3 ชั้น")
+        fig_time = go.Figure()
+        # แปลงแกนเวลาเป็นวินาทีสัมพัทธ์เพื่อให้ดูง่าย
+        relative_time = (df_data['uptime_ms'] - df_data['uptime_ms'].iloc[0]) / 1000.0
         
-    return float(np.median(hist)) if hist else band_power
-
-def compute_health(amps):
-    bases = [st.session_state[f'base_amp{i}'] for i in range(3)]
-    if any(b is None for b in bases): return [None]*3
-    return [min(amps[i]/bases[i]*100, 100.0) if bases[i] > 0 else 0.0 for i in range(3)]
-
-def update_status(pct, ch_idx, is_new_data, floor_name):
-    s = st.session_state[f'status{ch_idx}']
-    c = st.session_state[f'consec{ch_idx}']
-    
-    if not is_new_data:
-        return s, c
+        fig_time.add_trace(go.Scatter(x=relative_time, y=df_data['AccZ_CH2'], name="ชั้น 3 (Top)", line=dict(color='firebrick', width=2)))
+        fig_time.add_trace(go.Scatter(x=relative_time, y=df_data['AccZ_CH1'], name="ชั้น 2 (Mid)", line=dict(color='royalblue', width=2)))
+        fig_time.add_trace(go.Scatter(x=relative_time, y=df_data['AccZ_CH0'], name="ชั้น 1 (Base)", line=dict(color='forestgreen', width=1.5)))
         
-    new_s = s
-    if s == 'green':
-        c = c+1 if pct < G2Y else 0
-        if c >= MIN_CONSEC: new_s, c = 'yellow', 0
-    elif s == 'yellow':
-        cur_dir = 'up' if pct >= Y2G else ('down' if pct < Y2R else None)
-        prev_dir = st.session_state[f'consec_dir{ch_idx}']
-        if cur_dir != prev_dir: c = 0
-        st.session_state[f'consec_dir{ch_idx}'] = cur_dir
-        if cur_dir is not None:
-            c += 1
-            if c >= MIN_CONSEC:
-                new_s = 'green' if cur_dir == 'up' else 'red'
-                c = 0
-        else:
-            c = 0
-    elif s == 'red':
-        c = c+1 if pct >= R2Y else 0
-        if c >= MIN_CONSEC: new_s, c = 'yellow', 0
+        fig_time.update_layout(xaxis_title="เวลาสัมพันธ์ (วินาที)", yaxis_title="ความเร่ง (g)", margin=dict(l=20, r=20, t=20, b=20), height=400)
+        st.plotly_chart(fig_time, use_container_width=True)
 
-    # 🔔 ระบบดักตรวจเช็กสถานะเพื่อส่งเข้า Telegram (แจ้งเตือนทั้ง Yellow และ Red)
-    if new_s != st.session_state.prev_status[ch_idx]:
-        status_emojis = {'green': '🟢 ปกติ', 'yellow': '⚠️ เฝ้าระวัง', 'red': '🚨 อันตราย!'}
-        old_status_text = status_emojis.get(st.session_state.prev_status[ch_idx], st.session_state.prev_status[ch_idx])
-        new_status_text = status_emojis.get(new_s, new_s)
+    with tab2:
+        st.subheader("ความหนาแน่นสเปกตรัมกำลัง (Power Spectral Density - Welch Method)")
+        st.caption("กราฟนี้ใช้สำหรับหาค่าความถี่ธรรมชาติ (Natural Frequency) ของตัวอาคารเพื่อประเมินความเสียหาย")
         
-        # ประกอบข้อความแจ้งเตือน
-        msg = f"🔔 *[SmartVibe Alert]*\n📍 *{floor_name}*\n"
-        msg += f"🔄 สถานะเปลี่ยน: {old_status_text} ➡️ *{new_status_text}*\n"
-        msg += f"📉 Health % ล่าสุด: `{pct:.1f}%`"
-        
-        # เรียกส่งไลน์แจ้งเตือน Telegram
-        send_telegram_notification(msg)
-        
-        # บันทึกสถานะปัจจุบันเก็บไว้ตรวจสอบรอบถัดไป
-        st.session_state.prev_status[ch_idx] = new_s
+        fig_psd = go.Figure()
+        nperseg_actual = min(len(df_data), nperseg_val)
+        noverlap_actual = int(nperseg_actual * overlap_val)
 
-    st.session_state[f'status{ch_idx}'] = new_s
-    st.session_state[f'consec{ch_idx}'] = c
-    return new_s, c
+        # คำนวณ Welch Method แยกรายเซ็นเซอร์ความเคลื่อนไหวหลัก
+        for ch_name, label, color in [('AccZ_CH0', 'ชั้น 1 (Base)', 'forestgreen'), 
+                                      ('AccZ_CH1', 'ชั้น 2 (Mid)', 'royalblue'), 
+                                      ('AccZ_CH2', 'ชั้น 3 (Top)', 'firebrick')]:
+            
+            signal_data = df_data[ch_name].values - df_data[ch_name].mean() # ลบค่าเฉลี่ย DC Offset ออกก่อนคำนวณ
+            f, Pxx = welch(signal_data, fs=actual_fs, nperseg=nperseg_actual, noverlap=noverlap_actual)
+            
+            # ค้นหาตำแหน่งความถี่สูงสุด (Peak Frequency) 
+            peak_freq = f[np.argmax(Pxx)]
+            fig_psd.add_trace(go.Scatter(x=f, y=Pxx, name=f"{label} [Peak: {peak_freq:.2f} Hz]", line=dict(color=color, width=2)))
 
-def get_fft_graph_data(df):
-    result_freqs, result_psds = None, []
-    for col in ['AccX_CH0', 'AccX_CH1', 'AccX_CH2']:
-        sig = df[col].values.astype(float) - df[col].mean()
-        if len(sig) < 100: return None, None, None, None
-        fw, psd = welch(sig, fs=NOMINAL_FS, nperseg=min(256, len(sig)//2), window='hann')
-        valid = fw >= 0.5
-        if result_freqs is None: result_freqs = fw[valid]
-        result_psds.append(psd[valid])
-    return result_freqs, result_psds[0], result_psds[1], result_psds[2]
+        fig_psd.update_layout(xaxis_title="ความถี่ (Hz)", yaxis_title="กำลังสเปกตรัม (g²/Hz)", yaxis_type="log", margin=dict(l=20, r=20, t=20, b=20), height=450)
+        st.plotly_chart(fig_psd, use_container_width=True)
 
-# ==========================================
-# Main Execution
-# ==========================================
-df = fetch_data()
+    with tab3:
+        st.subheader("🔍 ข้อมูลตรวจเช็กระบบสัญญาณเชิงลึก")
+        st.write(f"ค่าความถี่สุ่มตัวอย่างตรวจวัดจริงจากบอร์ด: **{actual_fs:.2f} Hz**")
+        st.write("ตารางแสดงความคลาดเคลื่อนช่วงเวลาสุ่มตัวอย่าง (Delta T) ปัจจุบัน:")
+        st.line_chart(dt_series)
+        if dt_series.max() > 0.04:
+            st.warning("⚠️ มีสัญญาณกระตุกเล็กน้อย แต่ระบบคิว FreeRTOS จะพยายามดึงเวลากลับมาให้คงเดิมอัตโนมัติ")
 
-if not df.empty and len(df) > 50:
-    cur = df['uptime_ms'].iloc[-1]
-    is_new_data = (cur != st.session_state.last_uptime)
-    
-    if is_new_data:
-        st.session_state.stuck_counter = 0
-        st.session_state.last_uptime = cur
-    else:
-        st.session_state.stuck_counter += 1
-        
-    if st.session_state.stuck_counter >= 10:
-        st.error("🚨 ข้อมูลหยุดนิ่ง — เซ็นเซอร์อาจเน็ตหลุด หรือบอร์ดค้าง")
+else:
+    st.info("⌛ กำลังรอการเชื่อมต่อสตรีมข้อมูลความเร็วสูงจากบอร์ด ESP32 หรือฐานข้อมูลว่างเปล่า...")
 
-    amps = [get_band_power(df, f'AccX_CH{i}', i, is_new_data) for i in range(3)]
-    health = compute_health(amps)
-    floor_names = ["ชั้น 1 (ฐานราก)", "ชั้น 2 (กลาง)", "ชั้น 3 (ยอด)"]
-
-    st.info(f"🔊 Forcing: **{FORCING_FREQ} Hz** ±{BAND_HZ} Hz")
-    
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("🔒 ล็อก Baseline (ลำโพงเปิด + น็อตครบ)", type="primary", key="btn_lock"):
-            for i in range(3):
-                st.session_state[f'base_amp{i}'] = amps[i]
-                st.session_state[f'status{i}'] = 'green'
-                st.session_state[f'consec{i}'] = 0
-                st.session_state[f'consec_dir{i}'] = None
-                st.session_state.prev_status[i] = 'green'
-            ok = push_baseline_to_firebase(amps)
-            if ok: st.success("✅ ล็อก baseline และส่งขึ้น Firebase แล้ว")
-            st.rerun()
-    with c2:
-        if st.button("ล้างค่าทั้งหมด", key="btn_reset"):
-            for i in range(3):
-                st.session_state[f'base_amp{i}'] = None
-                st.session_state[f'history_a{i}'] = []
-                st.session_state[f'status{i}'] = 'green'
-                st.session_state[f'consec{i}'] = 0
-                st.session_state[f'consec_dir{i}'] = None
-                st.session_state.prev_status[i] = 'green'
-            st.rerun()
-
-    st.markdown("---")
-    cols = st.columns(3)
-
-    for i in range(3):
-        with cols[i]:
-            st.subheader(floor_names[i])
-            rms_now = st.session_state[f'rms_ch{i}']
-            hist = st.session_state[f'history_a{i}']
-            base = st.session_state[f'base_amp{i}']
-
-            st.markdown(f"RMS: `{rms_now:.4f}`")
-            st.progress(min(int(rms_now / 0.15 * 100), 100))
-
-            if base and base > 0:
-                delta_pct = (amps[i] - base) / base * 100
-                st.metric(f"Band Power ({FORCING_FREQ}±{BAND_HZ} Hz)", f"{amps[i]:.5f}", delta=f"{delta_pct:+.1f}%")
-            else:
-                st.metric(f"Band Power ({FORCING_FREQ}±{BAND_HZ} Hz)", f"{amps[i]:.5f}")
-
-            if len(hist) >= 3:
-                cv = np.std(hist)/np.mean(hist)*100 if np.mean(hist) > 0 else 0
-                st.caption(f"readings: {len(hist)}/{HISTORY_SIZE}  CV={cv:.1f}%  {'✅' if cv < 15 else '⚠️'}")
-
-            if base and base > 0 and health[i] is not None:
-                pct = health[i]
-                status, cnt = update_status(pct, i, is_new_data, floor_names[i])
-                st.metric("Health %", f"{pct:.1f}%")
-                st.progress(min(int(pct), 100))
-
-                if status == 'green': st.success(f"🟢 ปกติ: {pct:.1f}%")
-                elif status == 'yellow': st.warning(f"🟡 เฝ้าระวัง: {pct:.1f}%  [{cnt}/{MIN_CONSEC}]")
-                else: st.error(f"🔴 อันตราย: {pct:.1f}%  [{cnt}/{MIN_CONSEC}]")
-            else:
-                st.info("กด 🔒 ล็อก Baseline")
-
-    st.markdown("---")
-    st.subheader("กราฟ FFT แยกตามชั้น")
-    result = get_fft_graph_data(df)
-    if result[0] is not None:
-        xf, m0, m1, m2 = result
-        chart_df = pd.DataFrame({"ชั้น 1": m0, "ชั้น 2": m1, "ชั้น 3": m2}, index=xf)
-        st.line_chart(chart_df[chart_df.index <= 20], x_label="Frequency (Hz)", y_label="PSD")
-
-        with st.expander("ℹ️ debug"):
-            dts = df['uptime_ms'].diff().dropna()
-            nd = dts[(dts >= 15) & (dts <= 40)]
-            st.write("ช่วงดิฟของ Uptime (ms):", nd.describe())
-
-    st.markdown("---")
-    with st.expander("🤖 สถานะ Cloud Function (ฝั่งแจ้งเตือน Telegram)"):
-        remote_state = fetch_remote_state()
-        if not remote_state:
-            st.caption("ยังไม่มีข้อมูลจาก Cloud Function")
-        else:
-            cols2 = st.columns(3)
-            for i in range(3):
-                with cols2[i]:
-                    st.caption(floor_names[i])
-                    st.write(f"status: `{remote_state.get(f'status{i}', '-')}`")
-                    st.write(f"last_pct: `{remote_state.get(f'last_pct{i}', '-')}`")
+# สั่งให้สตรีมลิตรีเฟรชหน้าตัวเองทุกๆ 1 วินาที เพื่อจำลองระบบ Real-time Dashboard
+time.sleep(1)
+st.rerun()
